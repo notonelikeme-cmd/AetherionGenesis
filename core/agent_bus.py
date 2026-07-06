@@ -15,6 +15,10 @@ class AgentBus:
         self._agents[name] = agent
         self._subscriptions[name] = set(subscriptions) if subscriptions else {'*'}
 
+    def register(self, agent, subscriptions=None):
+        """Convenience: register an agent using its .name attribute."""
+        self.register_agent(agent.name, agent, subscriptions)
+
     def register_default_agents(self):
         """Reserved for built-ins (noop for now)."""
         pass

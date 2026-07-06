@@ -35,17 +35,18 @@ class Kernel:
 
         # Start consensus if env configured
         if os.environ.get("RAFT_ID"):
-            node_id = os.environ["RAFT_ID"]
-            peers = os.environ.get("RAFT_PEERS", "")
-            peers = peers.split(",") if peers else []
-            consensus = ConsensusNode(self.bus, node_id, peers)
+            consensus = ConsensusNode()
             consensus_thread = threading.Thread(target=consensus.run, daemon=True)
             consensus_thread.start()
         else:
             print("[consensus] Not configured. Set RAFT_ID to enable.")
 
-        # Start REPL (interactive shell)
-        start_repl(self.bus)
+        # Start REPL only when attached to a real terminal
+        import sys
+        if sys.stdin.isatty():
+            start_repl(self.bus)
+        else:
+            print("[kernel] Non-interactive mode — REPL skipped. Kernel running.")
 
 if __name__ == "__main__":
     Kernel().bootstrap()
