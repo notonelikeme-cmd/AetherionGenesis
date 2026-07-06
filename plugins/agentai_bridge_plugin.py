@@ -1,25 +1,19 @@
 """
 AgentAI Bridge Plugin — connects AetherionGenesis kernel to AgentAI's 3-tier
-model router and Nexus Trinity 7-gate pipeline.
+model router. Exposes the router as a bus-addressable service so any agent
+can request LLM completions without importing model_router directly.
 
-Message types dispatched:
-  agentai.complete   payload: {agent_id, prompt, system, gate, think, code}
-                     → routes to correct Ollama tier via model_router
-  agentai.gate       payload: {gate_num, hypothesis, contract, context}
-                     → runs a single Nexus Trinity gate
-  agentai.pipeline   payload: {hypothesis, contract}
-                     → runs the full 7-gate pipeline
+Bus messages handled:
+  agentai.complete  {agent_id, prompt, system, gate, think, code, max_tokens}
+                    → routes via model_router.complete(), emits agentai.result
 
-Message types emitted:
-  agentai.result     payload: {agent_id, result, tier}
-  agentai.finding    payload: {finding dict from gate output}
-  agentai.error      payload: {agent_id, error}
+Bus messages emitted:
+  agentai.result  {agent_id, result, tier, route}
+  agentai.error   {agent_id, error}
 """
 
-import sys
-import os
+import sys, os, threading
 
-# Add AgentAI to path
 _AGENTAI_PATH = os.path.expanduser("~/AgentAI")
 if _AGENTAI_PATH not in sys.path:
     sys.path.insert(0, _AGENTAI_PATH)
@@ -28,65 +22,68 @@ from core.agent import Agent
 
 
 class AgentAIBridgeAgent(Agent):
-    def __init__(self):
+    def __init__(self, bus):
         super().__init__(name="agentai_bridge")
+        self._bus    = bus
         self._router = None
-        self._pipeline = None
 
     def _get_router(self):
         if self._router is None:
             try:
-                from core.model_router import ModelRouter
+                from core.model_router import ModelRouter, agent_tier
                 self._router = ModelRouter()
+                self._agent_tier = agent_tier
             except Exception as e:
                 print(f"[agentai_bridge] model_router unavailable: {e}")
         return self._router
 
-    def _get_pipeline(self):
-        if self._pipeline is None:
-            try:
-                from core.gates.verification_loop import VerificationLoop
-                self._pipeline = VerificationLoop()
-            except Exception as e:
-                print(f"[agentai_bridge] pipeline unavailable: {e}")
-        return self._pipeline
-
     def handle(self, message_type, payload):
         if message_type == "agentai.complete":
-            self._handle_complete(payload)
-        elif message_type == "agentai.gate":
-            self._handle_gate(payload)
-        elif message_type == "agentai.pipeline":
-            self._handle_pipeline(payload)
+            # Run in thread — model calls block
+            threading.Thread(target=self._handle_complete, args=(payload,), daemon=True).start()
 
     def _handle_complete(self, payload):
         router = self._get_router()
         if not router:
+            self._bus.dispatch("agentai.error", {
+                "agent_id": payload.get("agent_id", "?"),
+                "error": "model_router not available",
+            })
             return
+
+        agent_id   = payload.get("agent_id", "")
+        prompt     = payload.get("prompt", "")
+        system     = payload.get("system")
+        gate       = payload.get("gate")
+        think      = payload.get("think", False)
+        code       = payload.get("code", False)
+        max_tokens = payload.get("max_tokens", 4096)
+
         try:
-            agent_id = payload.get("agent_id", "unknown")
             result = router.complete(
-                prompt=payload.get("prompt", ""),
-                system=payload.get("system"),
-                gate=payload.get("gate"),
-                think=payload.get("think", False),
-                code=payload.get("code", False),
-                agent_id=agent_id,
+                prompt=prompt,
+                system=system,
+                gate=gate,
+                max_tokens=max_tokens,
+                think=think,
+                code=code,
+                agent_id=agent_id or None,
             )
-            from core.agent_bus import AgentBus
-            tier = router.agent_tier(agent_id) if hasattr(router, "agent_tier") else "?"
-            print(f"[agentai_bridge] {agent_id} (tier {tier}) → {len(result)} chars")
+            tier  = self._agent_tier(agent_id) if agent_id and hasattr(self, "_agent_tier") else "?"
+            route = getattr(router, "_last_route", "?")
+            print(f"[agentai_bridge] {agent_id or 'anon'} tier={tier} route={route} → {len(result)} chars")
+            self._bus.dispatch("agentai.result", {
+                "agent_id": agent_id,
+                "result":   result,
+                "tier":     tier,
+                "route":    route,
+            })
         except Exception as e:
-            print(f"[agentai_bridge] complete error: {e}")
-
-    def _handle_gate(self, payload):
-        print(f"[agentai_bridge] gate {payload.get('gate_num')} → {payload.get('hypothesis', '')[:60]}")
-
-    def _handle_pipeline(self, payload):
-        print(f"[agentai_bridge] pipeline → {payload.get('hypothesis', '')[:80]}")
+            print(f"[agentai_bridge] complete error ({agent_id}): {e}")
+            self._bus.dispatch("agentai.error", {"agent_id": agent_id, "error": str(e)})
 
 
 def register(bus):
-    agent = AgentAIBridgeAgent()
-    bus.register(agent, subscriptions={"agentai.complete", "agentai.gate", "agentai.pipeline"})
+    agent = AgentAIBridgeAgent(bus)
+    bus.register(agent, subscriptions={"agentai.complete"})
     print("[plugin] agentai_bridge registered")

@@ -9,13 +9,18 @@ class ReplAgent(Agent):
         bus.register_agent(name, self, subscriptions={})
 
     def start(self):
-        import threading
+        import sys, threading
+        if not sys.stdin.isatty():
+            return
         def repl_loop():
             while True:
-                line = input(">> ")
+                try:
+                    line = input(">> ")
+                except (EOFError, KeyboardInterrupt):
+                    break
                 m = new_message("command", line.strip())
                 self.bus.dispatch("command", m)
-        threading.Thread(target=repl_loop, daemon=True).start()
+        threading.Thread(target=repl_loop, daemon=True, name="repl_loop").start()
 
 def register(bus):
     agent = ReplAgent("repl", bus)

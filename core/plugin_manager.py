@@ -10,9 +10,16 @@ class PluginManager:
         self.bus = bus
 
     def load_plugins(self):
-        for fname in os.listdir('plugins'):
-            if fname.endswith('.py') and fname != '__init__.py':
-                mod_name = f"plugins.{fname[:-3]}"
+        plugin_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'plugins')
+        if not os.path.isdir(plugin_dir):
+            return
+        for fname in sorted(os.listdir(plugin_dir)):
+            if not fname.endswith('.py') or fname == '__init__.py':
+                continue
+            mod_name = f"plugins.{fname[:-3]}"
+            try:
                 module = importlib.import_module(mod_name)
                 if hasattr(module, 'register'):
                     module.register(self.bus)
+            except Exception as e:
+                print(f"[plugin_manager] skipped {fname}: {e}")

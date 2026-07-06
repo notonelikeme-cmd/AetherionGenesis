@@ -43,6 +43,11 @@ class AgentBus:
         self._tls.depth = depth + 1
         try:
             for agent in list(self._targets(message_type)):
-                agent.handle(message_type, payload)
+                try:
+                    agent.handle(message_type, payload)
+                except NotImplementedError:
+                    pass  # unimplemented stub — skip silently
+                except Exception as e:
+                    print(f"[bus] {agent.name} raised on '{message_type}': {e}")
         finally:
             self._tls.depth = depth

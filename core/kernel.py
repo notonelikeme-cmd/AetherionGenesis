@@ -1,6 +1,8 @@
 import threading
 import time
+import signal
 import os
+import sys
 
 from core.agent_bus import AgentBus
 from core.plugin_manager import PluginManager
@@ -8,19 +10,21 @@ from core.message import Message
 from core.consensus import ConsensusNode
 from core.repl import start_repl
 
+
 class Kernel:
     def __init__(self):
-        self.bus = AgentBus()
+        self.bus     = AgentBus()
         self.plugins = PluginManager(self.bus)
+        self._stop   = threading.Event()
 
     def bootstrap(self):
         print("🚀 Bootstrapping AetherionPrime Kernel...")
 
-        # Start core agents
-        from agents.echo_agent import EchoAgent
-        from agents.logging_agent import LoggingAgent
-        from agents.heartbeat_agent import HeartbeatAgent
-        from agents.scheduler_agent import SchedulerAgent
+        # Core agents
+        from agents.echo_agent       import EchoAgent
+        from agents.logging_agent    import LoggingAgent
+        from agents.heartbeat_agent  import HeartbeatAgent
+        from agents.scheduler_agent  import SchedulerAgent
         from agents.perception_agent import PerceptionAgent
 
         self.bus.register(EchoAgent())
@@ -29,24 +33,37 @@ class Kernel:
         self.bus.register(SchedulerAgent(interval=5))
         self.bus.register(PerceptionAgent())
 
-        # Start plugin loader
-        plugin_thread = threading.Thread(target=self.plugins.load_plugins, daemon=True)
-        plugin_thread.start()
+        # Plugins — load in foreground so they're ready before we block
+        self.plugins.load_plugins()
 
-        # Start consensus if env configured
+        # Consensus (optional)
         if os.environ.get("RAFT_ID"):
             consensus = ConsensusNode()
-            consensus_thread = threading.Thread(target=consensus.run, daemon=True)
-            consensus_thread.start()
+            threading.Thread(target=consensus.run, daemon=True).start()
         else:
             print("[consensus] Not configured. Set RAFT_ID to enable.")
 
-        # Start REPL only when attached to a real terminal
-        import sys
+        # Signal handlers for clean shutdown
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, self._handle_signal)
+
+        # Interactive: hand off to REPL (blocks until user types exit)
         if sys.stdin.isatty():
             start_repl(self.bus)
         else:
-            print("[kernel] Non-interactive mode — REPL skipped. Kernel running.")
+            # Non-interactive (service / programmatic): keep process alive
+            print("[kernel] Service mode — waiting for SIGTERM/SIGINT to stop.")
+            self._stop.wait()
+            print("[kernel] Shutdown complete.")
+
+    def _handle_signal(self, signum, frame):
+        print(f"\n[kernel] Signal {signum} received — shutting down.")
+        self._stop.set()
+
+    def dispatch(self, message_type: str, payload):
+        """Convenience wrapper for external callers."""
+        self.bus.dispatch(message_type, payload)
+
 
 if __name__ == "__main__":
     Kernel().bootstrap()
