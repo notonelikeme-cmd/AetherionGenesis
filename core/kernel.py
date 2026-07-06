@@ -50,11 +50,14 @@ class Kernel:
         # Interactive: hand off to REPL (blocks until user types exit)
         if sys.stdin.isatty():
             start_repl(self.bus)
-        else:
-            # Non-interactive (service / programmatic): keep process alive
+        elif os.environ.get("AETHER_SERVICE"):
+            # Explicit long-running service mode: block until signal
             print("[kernel] Service mode — waiting for SIGTERM/SIGINT to stop.")
             self._stop.wait()
             print("[kernel] Shutdown complete.")
+        else:
+            # Non-interactive one-shot (import, test, pipeline dispatch): return immediately
+            print("[kernel] Ready.")
 
     def _handle_signal(self, signum, frame):
         print(f"\n[kernel] Signal {signum} received — shutting down.")
