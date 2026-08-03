@@ -3,19 +3,25 @@
 import os
 import time
 import random
-import openai
 import importlib
 from deap import base, creator, tools
 from core.agent_base import Agent
 from core.message import Message
+from core.bus_rpc import call as bus_call
 
-# Make sure OPENAI_API_KEY is set in your environment
-openai.api_key = os.getenv('OPENAI_API_KEY')
 
 class MetaLearningAgent(Agent):
     """
-    Auto-generates, tests, and installs new agent plugins
-    via LLM + genetic search.
+    Auto-generates, tests, and installs new agent plugins via LLM +
+    genetic search. Code generation runs through the AgentAI bridge
+    (agentai.complete → claude-fable-5 or local Ollama fallback)
+    instead of a direct OpenAI call.
+
+    NOTE: evaluate_candidate() writes LLM-generated code to disk and
+    imports it unreviewed. That was true before this change too — it's
+    a real risk (arbitrary code execution from model output) worth
+    sandboxing or gating behind manual review before this runs
+    unattended.
     """
     def __init__(self, name, bus, population=5, generations=3):
         super().__init__(name)
@@ -28,7 +34,6 @@ class MetaLearningAgent(Agent):
         if message_type != 'meta_train':
             return
 
-        # 1. Set up Genetic Algorithm
         creator.create("FitnessMax", base.Fitness, weights=(1.0,))
         creator.create("Individual", list, fitness=creator.FitnessMax)
         toolbox = base.Toolbox()
@@ -61,12 +66,19 @@ class MetaLearningAgent(Agent):
         return "Write a Python Agent plugin for Aetherion that logs every message with timestamp."
 
     def evaluate_candidate(self, individual):
-        prompt = "\\n".join(individual)
-        resp = openai.ChatCompletion.create(
-            model='gpt-4o-mini',
-            messages=[{'role': 'user', 'content': prompt}]
+        prompt = "\n".join(individual)
+        msg_type, reply = bus_call(
+            self.bus,
+            request_type="agentai.complete",
+            payload={"agent_id": "meta_learning", "prompt": prompt, "code": True},
+            reply_types={"agentai.result"},
+            timeout=60,
         )
-        code = resp.choices[0].message.content
+        if msg_type != "agentai.result":
+            print(f"[MetaLearningAgent] bridge unavailable/timed out ({msg_type}), fitness=0")
+            return 0.0
+
+        code = reply.get("result", "")
         fname = f"plugins/gen_{int(time.time())}.py"
         with open(fname, 'w') as f:
             f.write(code)
@@ -78,6 +90,7 @@ class MetaLearningAgent(Agent):
             return max(0.0, 1.0 - duration)
         except Exception:
             return 0.0
+
 
 def register(bus):
     MetaLearningAgent('meta_learning', bus)

@@ -1,9 +1,15 @@
+# Core — required
 networkx>=2.8
-openai
-faiss-cpu
 numpy
-watchdog
-pillow
-raftos
+faiss-cpu
 gitpython
-deap
+
+# Optional — enables additional plugins
+watchdog        # perception_plugin.py
+pillow          # vision agents
+deap            # evolutionary agents
+raftos          # distributed consensus (RAFT)
+
+# Optional — enables OpenAI-backed plugins
+# Uncomment if you have an OpenAI API key:
+# openai

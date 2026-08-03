@@ -19,10 +19,24 @@ def _conn():
     """)
     return c
 
+class _MsgEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if hasattr(obj, '__dataclass_fields__'):
+            return obj.__dict__
+        return str(obj)
+
 def append(message):
     conn = _conn()
-    conn.execute("INSERT INTO audit(ts, cid, parent_cid, type, payload, metadata) VALUES (?,?,?,?,?,?)",
-        (message.ts, message.cid, message.parent_cid, message.type, json.dumps(message.payload), json.dumps(message.metadata or {}))
+    conn.execute(
+        "INSERT INTO audit(ts, cid, parent_cid, type, payload, metadata) VALUES (?,?,?,?,?,?)",
+        (
+            message.ts,
+            message.cid,
+            message.parent_cid,
+            message.type,
+            json.dumps(message.payload, cls=_MsgEncoder),
+            json.dumps(message.metadata or {}, cls=_MsgEncoder),
+        ),
     )
     conn.commit()
     conn.close()

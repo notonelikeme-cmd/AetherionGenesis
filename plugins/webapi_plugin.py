@@ -5,6 +5,8 @@ import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from core.agent_base import Agent
+from core.message import new_message
+from core import caps, task_store, goal_store
 
 class WebAPIHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -24,17 +26,136 @@ class WebAPIHandler(BaseHTTPRequestHandler):
             src = qs.get('src', [None])[0]
             dst = qs.get('dst', [None])[0]
             resp = self.server.bus.graph.find_path(src, dst) if src and dst else {'error': 'src & dst required'}
+        elif path == '/kanban.json':
+            resp = {
+                'tasks': task_store.board(200),
+                'stats': task_store.stats(),
+                'goals': goal_store.get_all(),
+            }
+        elif path == '/kanban':
+            self._send_html(200, _KANBAN_PAGE)
+            return
         else:
             self.send_response(404)
             self.end_headers()
             return
 
+        self._send_json(200, resp)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        parts = parsed.path.strip('/').split('/')
+
+        if parts == ['leads']:
+            self._handle_lead_post()
+            return
+
+        if len(parts) != 2 or parts[0] != 'webhooks' or not parts[1]:
+            self.send_response(404)
+            self.end_headers()
+            return
+        name = parts[1]
+
+        token = self.headers.get('X-Cap-Token', '')
+        ok, info = caps.verify(token, required_scope=f"webhook:{name}")
+        if not ok:
+            self._send_json(401, {'error': f'unauthorized: {info}'})
+            return
+
+        length = int(self.headers.get('Content-Length', 0))
+        raw = self.rfile.read(length) if length else b'{}'
+        try:
+            body = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            self._send_json(400, {'error': 'invalid JSON body'})
+            return
+
+        msg_type = f"webhook.{name}"
+        self.server.bus.dispatch(msg_type, new_message(msg_type, body))
+        self._send_json(200, {'status': 'accepted', 'type': msg_type})
+
+    def _handle_lead_post(self):
+        token = self.headers.get('X-Cap-Token', '')
+        ok, info = caps.verify(token, required_scope="leads:write")
+        if not ok:
+            self._send_json(401, {'error': f'unauthorized: {info}'})
+            return
+
+        length = int(self.headers.get('Content-Length', 0))
+        raw = self.rfile.read(length) if length else b'{}'
+        try:
+            body = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            self._send_json(400, {'error': 'invalid JSON body'})
+            return
+
+        description = body.get('description', '')
+        if not description:
+            self._send_json(400, {'error': 'description required'})
+            return
+
+        step_index = task_store.enqueue_lead(description)
+        self.server.bus.dispatch('leads.queued', new_message('leads.queued', {'step_index': step_index, 'description': description}))
+        self._send_json(200, {'status': 'queued', 'step_index': step_index})
+
+    def _send_json(self, status, resp):
         body = json.dumps(resp).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_html(self, status, html):
+        body = html.encode()
+        self.send_response(status)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+_KANBAN_PAGE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>AetherionGenesis — Kanban</title>
+<meta http-equiv="refresh" content="10">
+<style>
+  body { font-family: -apple-system, sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 1.5rem; }
+  h1 { font-size: 1.1rem; color: #58a6ff; }
+  .stats { display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+  .stat { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 0.5rem 1rem; }
+  .board { display: flex; gap: 1rem; overflow-x: auto; }
+  .col { flex: 1; min-width: 220px; background: #161b22; border-radius: 6px; padding: 0.75rem; }
+  .col h2 { font-size: 0.85rem; text-transform: uppercase; color: #8b949e; margin: 0 0 0.5rem; }
+  .card { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 0.5rem; margin-bottom: 0.5rem; font-size: 0.8rem; }
+  .card .cycle { color: #8b949e; font-size: 0.7rem; }
+  .verdict-pass { color: #3fb950; } .verdict-fail { color: #f85149; }
+</style></head>
+<body>
+  <h1>AetherionGenesis — Task Board</h1>
+  <div class="stats" id="stats"></div>
+  <div class="board" id="board"></div>
+  <script>
+    fetch('/kanban.json').then(r => r.json()).then(data => {
+      const statsEl = document.getElementById('stats');
+      const s = data.stats;
+      statsEl.innerHTML = Object.entries(s.by_status || {}).map(([k,v]) => `<div class="stat">${k}: ${v}</div>`).join('')
+        + `<div class="stat">leads pending: ${s.leads_pending}</div>`
+        + (s.oldest_pending_seconds ? `<div class="stat">oldest: ${Math.round(s.oldest_pending_seconds/60)}m</div>` : '');
+
+      const cols = {running: [], executed: [], passed: [], failed: [], retried: []};
+      for (const t of data.tasks) { (cols[t.status] = cols[t.status] || []).push(t); }
+      const board = document.getElementById('board');
+      board.innerHTML = Object.entries(cols).map(([status, tasks]) => `
+        <div class="col"><h2>${status} (${tasks.length})</h2>
+          ${tasks.map(t => `<div class="card">
+            <div class="cycle">${t.cycle_id}</div>
+            <div>${(t.description||'').slice(0,120)}</div>
+            ${t.verdict ? `<div class="${t.verdict.toUpperCase().startsWith('PASS') ? 'verdict-pass' : 'verdict-fail'}">${t.verdict.slice(0,80)}</div>` : ''}
+          </div>`).join('')}
+        </div>`).join('');
+    });
+  </script>
+</body></html>"""
 
 class WebAPIAgent(Agent):
     def __init__(self, name, bus, host='0.0.0.0', port=8000):

@@ -13,13 +13,10 @@ Bus messages emitted:
   nexus.rejected     {hypothesis, gate, kill_pattern, reason}
 """
 
-import sys, os, json, traceback, threading
+import json, threading
 
-_AGENTAI_PATH = os.path.expanduser("~/AgentAI")
-if _AGENTAI_PATH not in sys.path:
-    sys.path.insert(0, _AGENTAI_PATH)
-
-from core.agent import Agent
+from core.agent_base import Agent
+from core.agentai_loader import load as load_agentai
 
 # ── Kill pattern definitions ──────────────────────────────────────────────────
 _KILL_PATTERNS = {
@@ -161,8 +158,8 @@ class NexusTrinityAgent(Agent):
     def _get_router(self):
         if self._router is None:
             try:
-                from core.model_router import ModelRouter
-                self._router = ModelRouter()
+                model_router = load_agentai("core.model_router")
+                self._router = model_router.ModelRouter()
             except Exception as e:
                 print(f"[nexus] model_router unavailable: {e}")
         return self._router

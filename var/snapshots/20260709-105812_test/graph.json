@@ -1,0 +1,17 @@
+{
+  "nodes": [
+    [
+      "root",
+      {
+        "type": "kernel"
+      }
+    ],
+    [
+      "test_node",
+      {
+        "type": "demo"
+      }
+    ]
+  ],
+  "edges": []
+}

@@ -19,6 +19,11 @@ class AgentBus:
         """Convenience: register an agent using its .name attribute."""
         self.register_agent(agent.name, agent, subscriptions)
 
+    def unregister_agent(self, name: str):
+        """Remove an agent (e.g. a one-shot RPC listener) from the bus."""
+        self._agents.pop(name, None)
+        self._subscriptions.pop(name, None)
+
     def register_default_agents(self):
         """Reserved for built-ins (noop for now)."""
         pass

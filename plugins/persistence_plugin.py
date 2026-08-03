@@ -15,9 +15,12 @@ class PersistenceAgent(Agent):
 
     def handle(self, message_type, payload):
         if message_type == 'tick':
+            graph = getattr(self.bus, 'graph', None)
+            if graph is None:
+                return
             data = {
-                'nodes': list(self.bus.graph.graph.nodes(data=True)),
-                'edges': list(self.bus.graph.graph.edges(data=True))
+                'nodes': list(graph.graph.nodes(data=True)),
+                'edges': list(graph.graph.edges(data=True))
             }
             with open(self.filename, 'w') as f:
                 json.dump(data, f, indent=2)
