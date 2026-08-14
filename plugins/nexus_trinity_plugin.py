@@ -25,6 +25,7 @@ import json, threading
 from core.agent_base import Agent
 from core.agentai_loader import load as load_agentai
 from core import poc_verifier
+from core import hallucination_guard
 
 # ── Kill pattern definitions ──────────────────────────────────────────────────
 _KILL_PATTERNS = {
@@ -270,6 +271,24 @@ class NexusTrinityAgent(Agent):
                     "reason": poc,
                 })
                 return
+
+            # Gate 3: cheap text-level fabrication pre-filter, before paying
+            # for a real forge run. This can only REJECT — see the hard
+            # boundary documented in core/hallucination_guard.py. A low
+            # score here is not evidence of anything; it just means we
+            # didn't find an obvious tell, so we still fall through to the
+            # real deterministic check either way.
+            if gate_num == 3 and isinstance(poc, str) and poc.strip():
+                reject, hg_score, hg_indicators = hallucination_guard.should_reject(poc)
+                if reject:
+                    print(f"[nexus] Gate 3 pre-filter rejected PoC (score {hg_score:.2f}): {hg_indicators}")
+                    self._bus.dispatch("nexus.rejected", {
+                        "hypothesis": hypothesis,
+                        "gate": 3,
+                        "kill_pattern": None,
+                        "reason": f"PoC failed fabrication pre-filter (score {hg_score:.2f}): {', '.join(hg_indicators)}",
+                    })
+                    return
 
             # Gate 3: deterministic re-execution. The LLM's own report that
             # its PoC passed is not evidence (see the module docstring in
