@@ -40,7 +40,8 @@ def load(module_name):
         for k in saved:
             del sys.modules[k]
 
-        if _AGENTAI_PATH not in sys.path:
+        inserted_path = _AGENTAI_PATH not in sys.path
+        if inserted_path:
             sys.path.insert(0, _AGENTAI_PATH)
 
         try:
@@ -50,6 +51,11 @@ def load(module_name):
                 if k == "core" or k.startswith("core."):
                     del sys.modules[k]
             sys.modules.update(saved)
+            if inserted_path:
+                try:
+                    sys.path.remove(_AGENTAI_PATH)
+                except ValueError:
+                    pass
 
         _cache[module_name] = module
         return module

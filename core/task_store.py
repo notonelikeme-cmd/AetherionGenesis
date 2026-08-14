@@ -94,38 +94,65 @@ _LEADS_CYCLE = "__leads__"
 
 
 def enqueue_lead(description: str) -> int:
+    # BEGIN IMMEDIATE acquires the write lock before the SELECT, so a
+    # concurrent enqueue_lead() can't compute the same next_index (each
+    # call opens its own connection, so an application-level lock in
+    # this process wouldn't protect against another process anyway —
+    # this relies on SQLite's own file locking).
     conn = _conn()
     now = time.time()
-    next_index = conn.execute(
-        "SELECT COALESCE(MAX(step_index), -1) + 1 FROM tasks WHERE cycle_id = ?", (_LEADS_CYCLE,)
-    ).fetchone()[0]
-    conn.execute(
-        "INSERT INTO tasks(cycle_id, step_index, description, status, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?)",
-        (_LEADS_CYCLE, next_index, description, now, now),
-    )
-    conn.commit()
-    conn.close()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        next_index = conn.execute(
+            "SELECT COALESCE(MAX(step_index), -1) + 1 FROM tasks WHERE cycle_id = ?", (_LEADS_CYCLE,)
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO tasks(cycle_id, step_index, description, status, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?)",
+            (_LEADS_CYCLE, next_index, description, now, now),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     return next_index
 
 
 def claim_next_lead():
-    """Atomically claim the oldest queued lead. Returns None if none pending."""
+    """Atomically claim the oldest queued lead. Returns None if none pending.
+
+    BEGIN IMMEDIATE holds the write lock across the whole
+    select-then-update, so two dispatchers calling this concurrently
+    can't both select the same row before either commits. The
+    `status = 'queued'` guard on the UPDATE (checked via rowcount) is a
+    belt-and-suspenders check in case that isolation is ever weakened."""
     conn = _conn()
-    with conn:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
         row = conn.execute(
             "SELECT step_index, description FROM tasks WHERE cycle_id = ? AND status = 'queued' "
             "ORDER BY created_at LIMIT 1",
             (_LEADS_CYCLE,),
         ).fetchone()
         if row is None:
-            conn.close()
+            conn.rollback()
             return None
         step_index, description = row
-        conn.execute(
-            "UPDATE tasks SET status = 'claimed', updated_at = ? WHERE cycle_id = ? AND step_index = ?",
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'claimed', updated_at = ? WHERE cycle_id = ? AND step_index = ? AND status = 'queued'",
             (time.time(), _LEADS_CYCLE, step_index),
         )
-    conn.close()
+        if cur.rowcount == 0:
+            # Someone else claimed it between our SELECT and UPDATE.
+            conn.rollback()
+            return None
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     return {"step_index": step_index, "description": description}
 
 

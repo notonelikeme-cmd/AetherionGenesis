@@ -56,9 +56,12 @@ class Kernel:
         else:
             print("[consensus] Not configured. Set RAFT_ID to enable.")
 
-        # Signal handlers for clean shutdown
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            signal.signal(sig, self._handle_signal)
+        # Signal handlers for clean shutdown (only installable from the main thread)
+        if threading.current_thread() is threading.main_thread():
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                signal.signal(sig, self._handle_signal)
+        else:
+            print("[kernel] Not on main thread — skipping signal handler registration.")
 
         # Interactive: hand off to REPL (blocks until user types exit)
         if sys.stdin.isatty():

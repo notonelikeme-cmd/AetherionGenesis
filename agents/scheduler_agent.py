@@ -23,6 +23,9 @@ class ChronoAgent(Agent):
         self.add_schedule("default", default_interval)
 
     def add_schedule(self, name, interval):
+        if not isinstance(interval, (int, float)) or interval <= 0:
+            print(f"[scheduler_agent] rejecting schedule '{name}': interval must be > 0 (got {interval!r})")
+            return
         with self._lock:
             if name in self._schedules:
                 return

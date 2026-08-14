@@ -34,16 +34,6 @@ import threading
 import time
 import uuid
 
-# Every agent/plugin in this codebase uses print() for logging, which
-# goes to stdout by default — but ACP requires stdout reserved
-# exclusively for JSON-RPC framing (standard practice for any
-# stdio-based JSON-RPC server, same reasoning as LSP). Save the real
-# stdout for protocol output, then redirect the process-wide stdout to
-# stderr *before* booting the kernel so every print() downstream lands
-# on stderr instead of corrupting the JSON-RPC stream.
-_PROTOCOL_STDOUT = sys.stdout
-sys.stdout = sys.stderr
-
 # plugins/cli_plugin.py also reads stdin (for interactive CLI commands)
 # in its own thread on every kernel boot — that races with this
 # server's own stdin reads and silently steals JSON-RPC lines (see
@@ -59,16 +49,33 @@ PROTOCOL_VERSION = "1"
 
 class ACPServer:
     def __init__(self):
+        # Every agent/plugin in this codebase uses print() for logging, which
+        # goes to stdout by default — but ACP requires stdout reserved
+        # exclusively for JSON-RPC framing (standard practice for any
+        # stdio-based JSON-RPC server, same reasoning as LSP). Save the real
+        # stdout for protocol output, then redirect the process-wide stdout to
+        # stderr *before* booting the kernel so every print() downstream lands
+        # on stderr instead of corrupting the JSON-RPC stream. Done here (at
+        # server construction) rather than at module import time, so merely
+        # importing this module doesn't hijack the importer's stdout.
+        self._real_stdout = sys.stdout
+        sys.stdout = sys.stderr
+
         self.kernel = Kernel()
         self.kernel.bootstrap()
         self.sessions = {}  # sessionId -> {"cwd": str}
         self._out_lock = threading.Lock()
+        # Each prompt can wait up to 90s on the model router (see
+        # _handle_prompt's bus_call timeout) — cap how many can be in
+        # flight at once so a fast client can't exhaust threads/memory.
+        self._MAX_CONCURRENT = 8
+        self._inflight = threading.Semaphore(self._MAX_CONCURRENT)
 
     def _write(self, obj):
         line = json.dumps(obj)
         with self._out_lock:
-            _PROTOCOL_STDOUT.write(line + "\n")
-            _PROTOCOL_STDOUT.flush()
+            self._real_stdout.write(line + "\n")
+            self._real_stdout.flush()
 
     def _respond(self, id_, result=None, error=None):
         msg = {"jsonrpc": "2.0", "id": id_}
@@ -98,7 +105,19 @@ class ACPServer:
                 req = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            threading.Thread(target=self._dispatch, args=(req,), daemon=True).start()
+            if not self._inflight.acquire(blocking=False):
+                self._respond(req.get("id"), error={
+                    "code": -32000,
+                    "message": f"server overloaded — max {self._MAX_CONCURRENT} concurrent requests in flight",
+                })
+                continue
+            threading.Thread(target=self._dispatch_bounded, args=(req,), daemon=True).start()
+
+    def _dispatch_bounded(self, req):
+        try:
+            self._dispatch(req)
+        finally:
+            self._inflight.release()
 
     def _dispatch(self, req):
         method = req.get("method")

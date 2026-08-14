@@ -10,6 +10,23 @@ from core.agent_base import Agent
 from core.message import new_message
 from core import task_store
 
+_DEFAULT_BOARD_LIMIT = 50
+_MAX_BOARD_LIMIT = 500
+
+
+def _bound_limit(raw, default=_DEFAULT_BOARD_LIMIT, maximum=_MAX_BOARD_LIMIT):
+    """Coerce a caller-supplied limit to a positive int capped at
+    `maximum`. SQLite treats `LIMIT -1` (and other non-positive values)
+    as "no limit", so an unvalidated value here would let a caller force
+    a full-table dump."""
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        return default
+    if limit <= 0:
+        return default
+    return min(limit, maximum)
+
 
 class TaskQueueAgent(Agent):
     def __init__(self, bus):
@@ -30,7 +47,7 @@ class TaskQueueAgent(Agent):
                 "tasks.list_result", {"cycle_id": cycle_id, "tasks": tasks, "request_id": request_id},
             ))
         elif message_type == "tasks.board":
-            limit = payload.get("limit", 50)
+            limit = _bound_limit(payload.get("limit", _DEFAULT_BOARD_LIMIT))
             self.bus.dispatch("tasks.board_result", new_message(
                 "tasks.board_result", {"tasks": task_store.board(limit), "request_id": request_id},
             ))

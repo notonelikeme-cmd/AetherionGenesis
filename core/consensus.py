@@ -16,6 +16,7 @@ class ConsensusNode:  # alias kept for kernel import compatibility
             p.strip() for p in peers_env.split(',') if _valid(p)
         ]
         if _RAFTOS:
+            os.makedirs('./logs', exist_ok=True)
             raftos.configure({'log_path': f'./logs/{self.node_id or "node"}'})
 
     async def start(self):

@@ -18,11 +18,12 @@ conductor, not a new instrument:
                 everything else goes through agentai.complete
   verify     -> agentai.complete asked to give a PASS/FAIL verdict
   optimize   -> one retry pass on FAILs, using the verdict as critique
+  integrate  -> writes goal/task/verdict nodes+edges into bus.graph
   state      -> dispatches 'tick' (drives PersistenceAgent to persist
-                bus.graph to disk)
+                bus.graph to disk) — runs after integrate so the
+                persisted graph includes this cycle's nodes/edges
   memory     -> dispatches 'cycle_result' (VectorMemoryAgent embeds
                 and stores it automatically)
-  integrate  -> writes goal/task/verdict nodes+edges into bus.graph
   loop       -> emits 'loop_result'; if continuous and something
                 failed, re-enters at discovery with a follow-up goal
 
@@ -61,7 +62,7 @@ class CycleAgent(Agent):
             for g in goal_store.get_active():
                 print(f"[loop_orchestrator] resuming goal #{g['id']}: {g['description']}")
                 threading.Thread(
-                    target=self._run_cycle,
+                    target=self._run_cycle_loop,
                     args=(g["description"], g["continuous"], g["id"]),
                     daemon=True,
                 ).start()
@@ -87,7 +88,7 @@ class CycleAgent(Agent):
         goal = payload.get("goal", "")
         continuous = bool(payload.get("continuous", False))
         goal_id = payload.get("goal_id") or goal_store.create(goal, continuous)
-        threading.Thread(target=self._run_cycle, args=(goal, continuous, goal_id), daemon=True).start()
+        threading.Thread(target=self._run_cycle_loop, args=(goal, continuous, goal_id), daemon=True).start()
 
     def _drain_steer(self, goal_id):
         with self._steer_lock:
@@ -104,9 +105,9 @@ class CycleAgent(Agent):
         results = self._execute(steps, cycle_id, goal_id, depth)
         results = self._verify(results, cycle_id)
         results = self._optimize(results, cycle_id)
+        next_goal = self._integrate(cycle_id, goal, results)
         self._state(cycle_id)
         self._memory(cycle_id, goal, results)
-        next_goal = self._integrate(cycle_id, goal, results)
 
         all_passed = all(r["verdict"].upper().startswith("PASS") for r in results) if results else True
 
@@ -127,10 +128,20 @@ class CycleAgent(Agent):
 
         print(f"[cycle {cycle_id}] === complete (depth={depth}, {sum(1 for r in results if r['verdict'].upper().startswith('PASS'))}/{len(results)} passed)")
 
-        if depth == 0 and continuous and next_goal:
-            self._run_cycle(next_goal, continuous, goal_id, depth=0)
-
         return results, next_goal
+
+    def _run_cycle_loop(self, goal, continuous, goal_id):
+        """Entry point for depth-0 cycles. A continuous goal that keeps
+        producing a follow-up iterates here instead of _run_cycle calling
+        itself — Python has no tail-call optimization, so a long or
+        endlessly-failing continuous run would otherwise grow the call
+        stack until RecursionError."""
+        current_goal = goal
+        while True:
+            results, next_goal = self._run_cycle(current_goal, continuous, goal_id, depth=0)
+            if not (continuous and next_goal):
+                return results, next_goal
+            current_goal = next_goal
 
     # ---- Discovery ----------------------------------------------------------
 
@@ -262,23 +273,25 @@ class CycleAgent(Agent):
 
     # ---- Verify -----------------------------------------------------------------
 
+    def _verify_step(self, r):
+        if r["output"] is None:
+            return "FAIL: no output produced"
+        msg_type, reply = bus_call(
+            self.bus, "agentai.complete",
+            {
+                "agent_id": "loop_orchestrator",
+                "system": "You are a strict verifier. Reply with exactly PASS or FAIL: <reason>.",
+                "prompt": f"Task: {r['step']}\n\nResult: {r['output']}\n\nDoes the result actually accomplish the task?",
+            },
+            reply_types={"agentai.result"}, timeout=45,
+        )
+        return reply.get("result", "").strip() if msg_type == "agentai.result" else "UNVERIFIED (bridge unavailable)"
+
     def _verify(self, results, cycle_id):
         for r in results:
             if r["verdict"] is not None:
                 continue  # orchestrated sub-cycle steps already carry a verdict
-            if r["output"] is None:
-                r["verdict"] = "FAIL: no output produced"
-                continue
-            msg_type, reply = bus_call(
-                self.bus, "agentai.complete",
-                {
-                    "agent_id": "loop_orchestrator",
-                    "system": "You are a strict verifier. Reply with exactly PASS or FAIL: <reason>.",
-                    "prompt": f"Task: {r['step']}\n\nResult: {r['output']}\n\nDoes the result actually accomplish the task?",
-                },
-                reply_types={"agentai.result"}, timeout=45,
-            )
-            r["verdict"] = reply.get("result", "").strip() if msg_type == "agentai.result" else "UNVERIFIED (bridge unavailable)"
+            r["verdict"] = self._verify_step(r)
         for i, r in enumerate(results):
             status = "passed" if r["verdict"].upper().startswith("PASS") else "failed"
             task_store.upsert(cycle_id, i, r["step"], status, output=r["output"], verdict=r["verdict"])
@@ -304,7 +317,7 @@ class CycleAgent(Agent):
             )
             if msg_type == "agentai.result":
                 r["output"] = reply.get("result", r["output"])
-                r["verdict"] += " -> retried"
+                r["verdict"] = self._verify_step(r) + " (retried)"
                 task_store.upsert(cycle_id, i, r["step"], "retried", output=r["output"], verdict=r["verdict"])
         return results
 

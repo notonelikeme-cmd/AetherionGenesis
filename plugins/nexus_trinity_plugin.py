@@ -13,6 +13,13 @@ Bus messages emitted:
   nexus.rejected     {hypothesis, gate, kill_pattern, reason}
 """
 
+# `int | None` below is PEP 604 syntax (Python 3.10+); this repo runs on
+# Python 3.9 in at least one deployment target (the local dev machine),
+# where evaluating that annotation at def-time raises TypeError and
+# plugin_manager silently skips loading this entire module. Deferring
+# annotation evaluation makes the syntax safe back to Python 3.7.
+from __future__ import annotations
+
 import json, threading
 
 from core.agent_base import Agent
@@ -202,6 +209,7 @@ class NexusTrinityAgent(Agent):
 
         evidence = {}
         poc = ""
+        economic = {}
 
         for gate_num in gates:
             if gate_num not in _GATES:
@@ -224,6 +232,8 @@ class NexusTrinityAgent(Agent):
                 evidence = result["output"]
             if gate_num == 3 and result.get("output"):
                 poc = result["output"] if isinstance(result["output"], str) else str(result["output"])
+            if gate_num == 5 and isinstance(result.get("output"), dict):
+                economic = result["output"]
 
             # Gate kill
             if result.get("kill_reason"):
@@ -273,7 +283,6 @@ class NexusTrinityAgent(Agent):
                     return
 
         # All gates passed — emit finding
-        economic = evidence.get("economic", {}) if isinstance(evidence, dict) else {}
         severity = economic.get("severity", "High") if isinstance(economic, dict) else "High"
         print(f"\n[nexus] ✅ FINDING CONFIRMED — {severity}")
         self._bus.dispatch("nexus.finding", {
@@ -335,6 +344,7 @@ class NexusTrinityAgent(Agent):
                 print(f"[nexus] gate {gate_num} error: {e}")
         else:
             raw_output = "[model_router unavailable — skipped]"
+            kill_reason = "model_router unavailable — gate could not execute"
 
         result = {
             "gate_num":    gate_num,

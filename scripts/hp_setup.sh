@@ -27,7 +27,9 @@ echo "[2/5] Checking base models..."
 REQUIRED_MODELS=("llama4:scout" "qwen2.5-coder:14b" "deepseek-r1:14b" "gemma4:latest")
 MISSING=()
 for model in "${REQUIRED_MODELS[@]}"; do
-  if ollama list | grep -q "^${model%:*}"; then
+  # Match the full "name:tag" combination so a different tag of the same
+  # base model doesn't get mistaken for the required one.
+  if ollama list | awk 'NR>1 {print $1}' | grep -Fxq "$model"; then
     echo "      ✓ $model"
   else
     echo "      ✗ $model — MISSING, pulling..."
@@ -90,7 +92,7 @@ timeout 10 python3 -c "
 from core.kernel import Kernel
 k = Kernel()
 k.bootstrap()
-" && echo "      ✓ kernel boots clean" || echo "      ✗ kernel boot failed — check output above"
+" < /dev/null && echo "      ✓ kernel boots clean" || echo "      ✗ kernel boot failed — check output above"
 
 echo ""
 echo "=== HP Setup Complete ==="

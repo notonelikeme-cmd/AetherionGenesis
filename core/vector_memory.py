@@ -1,4 +1,6 @@
 # core/vector_memory.py
+import threading
+
 import faiss
 import numpy as np
 
@@ -10,21 +12,30 @@ class VectorMemory:
         self.dim = dim
         self.index = faiss.IndexFlatL2(dim)
         self.metadata = []
+        # add() is called from a separate thread per embedded bus
+        # message (see VectorMemoryAgent), and it mutates the FAISS
+        # index and the metadata list as two separate operations —
+        # without a lock, concurrent adds can interleave and leave
+        # metadata[i] pointing at the wrong index entry. search() takes
+        # the same lock so it can't read mid-update either.
+        self._lock = threading.Lock()
 
     def add(self, vector, meta):
         """
         Add a vector with associated metadata.
         """
-        self.index.add(np.array([vector]).astype('float32'))
-        self.metadata.append(meta)
+        with self._lock:
+            self.index.add(np.array([vector]).astype('float32'))
+            self.metadata.append(meta)
 
     def search(self, query_vector, k=5):
         """
         Return top-k metadata for nearest neighbors to query_vector.
         """
-        D, I = self.index.search(np.array([query_vector]).astype('float32'), k)
-        results = []
-        for distances, indices in zip(D, I):
-            for dist, idx in zip(distances, indices):
-                results.append((self.metadata[idx], dist))
-        return results
+        with self._lock:
+            D, I = self.index.search(np.array([query_vector]).astype('float32'), k)
+            results = []
+            for distances, indices in zip(D, I):
+                for dist, idx in zip(distances, indices):
+                    results.append((self.metadata[idx], dist))
+            return results

@@ -28,6 +28,17 @@ BRANCH_ROOT = os.getenv("BRANCH_ROOT", "var/branches")
 _CURRENT_FILE = os.path.join(BRANCH_ROOT, ".current")
 
 
+def _contain(root: str, path: str) -> str:
+    """Resolve `path` and ensure it stays within `root`; raise if a
+    caller-supplied name (e.g. an absolute path or one containing '..')
+    would let it escape root."""
+    root_abs = os.path.abspath(root)
+    path_abs = os.path.abspath(path)
+    if path_abs != root_abs and not path_abs.startswith(root_abs + os.sep):
+        raise ValueError(f"invalid branch name: escapes {root!r}")
+    return path_abs
+
+
 def current() -> str:
     if os.path.exists(_CURRENT_FILE):
         with open(_CURRENT_FILE) as f:
@@ -42,7 +53,7 @@ def _set_current(name):
 
 
 def fork(bus, name) -> dict:
-    path = os.path.join(BRANCH_ROOT, name)
+    path = _contain(BRANCH_ROOT, os.path.join(BRANCH_ROOT, name or ""))
     captured = snapshot.capture_into(bus, path)
     with open(os.path.join(path, "manifest.json"), "w") as f:
         json.dump({"created_at": time.time(), "name": name, "forked_from": current()}, f, indent=2)
@@ -50,7 +61,7 @@ def fork(bus, name) -> dict:
 
 
 def switch(bus, name) -> dict:
-    path = os.path.join(BRANCH_ROOT, name)
+    path = _contain(BRANCH_ROOT, os.path.join(BRANCH_ROOT, name or ""))
     if not os.path.isdir(path):
         raise FileNotFoundError(f"no such branch: {name}")
     restored = snapshot.apply_from(bus, path)
@@ -61,7 +72,7 @@ def switch(bus, name) -> dict:
 def merge(bus, name) -> dict:
     """Union `name`'s graph into the live graph. Branch's attributes
     win on node/edge conflicts."""
-    path = os.path.join(BRANCH_ROOT, name)
+    path = _contain(BRANCH_ROOT, os.path.join(BRANCH_ROOT, name or ""))
     graph_path = os.path.join(path, "graph.json")
     if not os.path.exists(graph_path):
         raise FileNotFoundError(f"branch {name} has no captured graph")

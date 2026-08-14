@@ -9,11 +9,25 @@ from core.message import new_message
 from core import caps, task_store, goal_store
 
 class WebAPIHandler(BaseHTTPRequestHandler):
+    def _require_scope(self, scope, qs):
+        """Kanban data/HTML can carry task descriptions and verdicts from
+        anywhere leads.write can reach — require a capability token like
+        the POST endpoints already do. Accepts the token via header
+        (curl/scripts) or a `token` query param (plain browser nav)."""
+        token = self.headers.get('X-Cap-Token', '') or qs.get('token', [''])[0]
+        return caps.verify(token, required_scope=scope)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
         qs = parse_qs(parsed.query)
         graph = self.server.bus.graph.graph
+
+        if path in ('/kanban.json', '/kanban'):
+            ok, info = self._require_scope('kanban:read', qs)
+            if not ok:
+                self._send_json(401, {'error': f'unauthorized: {info}'})
+                return
 
         if path == '/nodes':
             resp = list(graph.nodes(data=True))
@@ -135,22 +149,28 @@ _KANBAN_PAGE = """<!doctype html>
   <div class="stats" id="stats"></div>
   <div class="board" id="board"></div>
   <script>
+    // Task descriptions/verdicts are persisted user/lead input (e.g. via
+    // POST /leads) — escape before interpolating into innerHTML so a
+    // crafted description can't execute as markup/script here.
+    function esc(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
     fetch('/kanban.json').then(r => r.json()).then(data => {
       const statsEl = document.getElementById('stats');
       const s = data.stats;
-      statsEl.innerHTML = Object.entries(s.by_status || {}).map(([k,v]) => `<div class="stat">${k}: ${v}</div>`).join('')
-        + `<div class="stat">leads pending: ${s.leads_pending}</div>`
-        + (s.oldest_pending_seconds ? `<div class="stat">oldest: ${Math.round(s.oldest_pending_seconds/60)}m</div>` : '');
+      statsEl.innerHTML = Object.entries(s.by_status || {}).map(([k,v]) => `<div class="stat">${esc(k)}: ${esc(v)}</div>`).join('')
+        + `<div class="stat">leads pending: ${esc(s.leads_pending)}</div>`
+        + (s.oldest_pending_seconds ? `<div class="stat">oldest: ${esc(Math.round(s.oldest_pending_seconds/60))}m</div>` : '');
 
       const cols = {running: [], executed: [], passed: [], failed: [], retried: []};
       for (const t of data.tasks) { (cols[t.status] = cols[t.status] || []).push(t); }
       const board = document.getElementById('board');
       board.innerHTML = Object.entries(cols).map(([status, tasks]) => `
-        <div class="col"><h2>${status} (${tasks.length})</h2>
+        <div class="col"><h2>${esc(status)} (${tasks.length})</h2>
           ${tasks.map(t => `<div class="card">
-            <div class="cycle">${t.cycle_id}</div>
-            <div>${(t.description||'').slice(0,120)}</div>
-            ${t.verdict ? `<div class="${t.verdict.toUpperCase().startsWith('PASS') ? 'verdict-pass' : 'verdict-fail'}">${t.verdict.slice(0,80)}</div>` : ''}
+            <div class="cycle">${esc(t.cycle_id)}</div>
+            <div>${esc((t.description||'').slice(0,120))}</div>
+            ${t.verdict ? `<div class="${t.verdict.toUpperCase().startsWith('PASS') ? 'verdict-pass' : 'verdict-fail'}">${esc(t.verdict.slice(0,80))}</div>` : ''}
           </div>`).join('')}
         </div>`).join('');
     });

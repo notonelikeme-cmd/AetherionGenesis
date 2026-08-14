@@ -1,5 +1,6 @@
 # core/agent_bus.py
 import threading
+import traceback
 
 class AgentBus:
     """
@@ -8,12 +9,14 @@ class AgentBus:
     def __init__(self):
         self._agents = {}          # name -> agent instance
         self._subscriptions = {}   # name -> set of message types or {'*'}
+        self._registry_lock = threading.Lock()
         self._tls = threading.local()
 
     def register_agent(self, name: str, agent, subscriptions=None):
         """Register an agent and (optionally) restrict which topics it receives."""
-        self._agents[name] = agent
-        self._subscriptions[name] = set(subscriptions) if subscriptions else {'*'}
+        with self._registry_lock:
+            self._agents[name] = agent
+            self._subscriptions[name] = set(subscriptions) if subscriptions else {'*'}
 
     def register(self, agent, subscriptions=None):
         """Convenience: register an agent using its .name attribute."""
@@ -21,17 +24,21 @@ class AgentBus:
 
     def unregister_agent(self, name: str):
         """Remove an agent (e.g. a one-shot RPC listener) from the bus."""
-        self._agents.pop(name, None)
-        self._subscriptions.pop(name, None)
+        with self._registry_lock:
+            self._agents.pop(name, None)
+            self._subscriptions.pop(name, None)
 
     def register_default_agents(self):
         """Reserved for built-ins (noop for now)."""
         pass
 
     def _targets(self, message_type: str):
+        with self._registry_lock:
+            agents = list(self._agents.items())
+            subs_map = dict(self._subscriptions)
         targets = []
-        for name, agent in self._agents.items():
-            subs = self._subscriptions.get(name, {'*'})
+        for name, agent in agents:
+            subs = subs_map.get(name, {'*'})
             if '*' in subs or message_type in subs:
                 targets.append(agent)
         return targets
@@ -53,6 +60,6 @@ class AgentBus:
                 except NotImplementedError:
                     pass  # unimplemented stub — skip silently
                 except Exception as e:
-                    print(f"[bus] {agent.name} raised on '{message_type}': {e}")
+                    print(f"[bus] {agent.name} raised on '{message_type}': {e}\n{traceback.format_exc()}")
         finally:
             self._tls.depth = depth
