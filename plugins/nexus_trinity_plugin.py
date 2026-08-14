@@ -26,6 +26,7 @@ from core.agent_base import Agent
 from core.agentai_loader import load as load_agentai
 from core import poc_verifier
 from core import hallucination_guard
+from core import aderyn_scanner
 
 # ── Kill pattern definitions ──────────────────────────────────────────────────
 _KILL_PATTERNS = {
@@ -424,7 +425,7 @@ class NexusTrinityAgent(Agent):
         if gate_num == 1:
             return f"Contract: {contract}\n\nCode:\n{code[:6000]}\n\nForm a specific vulnerability hypothesis."
         if gate_num == 2:
-            return f"Hypothesis: {hypothesis}\n\nContract: {contract}\n\nCode:\n{code[:6000]}"
+            return f"Hypothesis: {hypothesis}\n\nContract: {contract}\n\nCode:\n{code[:6000]}{self._aderyn_evidence_block(code)}"
         if gate_num == 3:
             return f"Hypothesis: {hypothesis}\n\nEvidence:\n{ev_str}\n\nContract: {contract}\n\nWrite the Foundry fork PoC."
         if gate_num == 4:
@@ -439,6 +440,22 @@ class NexusTrinityAgent(Agent):
         if gate_num == 7:
             return f"PoC to verify:\n\n{poc}\n\nVerify reproducibility and output JSON verdict."
         return hypothesis
+
+    def _aderyn_evidence_block(self, code: str) -> str:
+        """Real static-analysis findings from Aderyn, appended to Gate 2's
+        prompt as independent corroborating evidence. Aderyn's ruleset is
+        generic (missing-address(0)-checks, tx.origin usage, etc.) and has
+        no idea what this specific hypothesis claims — it can corroborate
+        or contradict, but the LLM still has to form its own judgment.
+        Never blocks the pipeline: empty code, an unavailable binary, or a
+        scan error all just mean no extra evidence, not a failure."""
+        if not code or not code.strip():
+            return ""
+        result = aderyn_scanner.scan(code)
+        if result["status"] != "OK" or not result["issues"]:
+            return ""
+        issues_str = "\n".join(f"  - {i['id']}: {i['title']}" for i in result["issues"])
+        return f"\n\nIndependent static-analysis findings (Aderyn, not hypothesis-aware — corroborating evidence only):\n{issues_str}"
 
     def _parse_output(self, gate_num: int, raw: str):
         if gate_num in (2, 4, 5, 7):

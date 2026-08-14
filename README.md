@@ -74,11 +74,15 @@ A finding only exits the pipeline if the adversarial challenger **cannot refute 
 
 A run that executes and disproves the claim, at either layer, is a hard kill (`nexus.rejected`). A run that can't execute (no `forge` on PATH, RPC down) doesn't silently pass — it's recorded in the finding's `deterministic_verification` field so you know a submission wasn't independently re-checked before you act on it.
 
+**Gate 2 gets a second, independent signal too.** `core/aderyn_scanner.py` runs [Aderyn](https://github.com/Cyfrin/aderyn) (Cyfrin's static analyzer) against the contract code and appends its real findings to Gate 2's prompt, clearly labeled as corroborating evidence only — Aderyn's ruleset is generic and has no idea what the specific hypothesis claims, so it can support or contradict it but never substitutes for the LLM's own read. Unavailable/errored scans degrade to no extra evidence, never to a failure. (Note on `aderyn`'s CLI, confirmed by direct testing: `--skip-update-check` is required when installed via `cargo install` — without it, the tool panics in an unrelated self-update step immediately *after* writing a correct report; `--stdout` mode is separately broken for instance-location printing in v0.1.9, so this module writes to a real file and reads it back instead.)
+
+**Halmos was evaluated and deliberately not integrated.** It's a genuine, well-built symbolic execution tool, but it doesn't support `vm.createFork`/`vm.createSelectFork` at all — confirmed by direct testing, not documentation ("Unsupported cheat code" on the fork call). Since every Gate 3 PoC in this pipeline forks a real chain by design (rule #1 in Gate 3's prompt), Halmos's symbolic-EVM-in-isolation model is a fundamental architecture mismatch here, not a configuration problem. Forcing it in would mean either it silently does nothing useful or Gate 3 stops testing against real deployed state — worse than not having it.
+
 ---
 
 ## Quickstart (local, no Docker required)
 
-**Prerequisites:** Python 3.9+, [Ollama](https://ollama.com) with at least one model pulled. Optional but recommended for Gate 3's deterministic re-verification: [Foundry](https://getfoundry.sh) (`forge`) on PATH and `ETH_RPC_URL` set to a mainnet RPC — without these, Gate 3 still runs, but findings won't be independently re-checked (this is recorded in the finding's `deterministic_verification` field, not silently skipped).
+**Prerequisites:** Python 3.9+, [Ollama](https://ollama.com) with at least one model pulled. Optional but recommended for Gate 3's deterministic re-verification: [Foundry](https://getfoundry.sh) (`forge`) on PATH and `ETH_RPC_URL` set to a mainnet RPC — without these, Gate 3 still runs, but findings won't be independently re-checked (this is recorded in the finding's `deterministic_verification` field, not silently skipped). Also optional, for Gate 2's static-analysis evidence: [Aderyn](https://github.com/Cyfrin/aderyn) (`cargo install aderyn`) on PATH — without it, Gate 2 just runs without the extra evidence.
 
 ```bash
 # 1. Clone
