@@ -24,6 +24,7 @@ import json, threading
 
 from core.agent_base import Agent
 from core.agentai_loader import load as load_agentai
+from core import poc_verifier
 
 # ── Kill pattern definitions ──────────────────────────────────────────────────
 _KILL_PATTERNS = {
@@ -68,6 +69,15 @@ Rules — violation = automatic kill:
 3. Assertion MUST be able to fail: vm.assertGt(stolen, 0) or vm.assertEq(balance, 0). Never assertTrue(true).
 4. Include exact forge command to run it.
 5. If hypothesis is not exploitable via fork test: say "UNEXPLOITABLE: <reason>".
+6. This test is re-run automatically by an independent, non-LLM verifier —
+   your own narration of the result is not trusted. You MUST emit these
+   exact console.log markers or the PoC will be treated as unconfirmed
+   regardless of what you claim in prose:
+   - console.log("BEFORE_STATE", <uint state relevant to the exploit, measured before the attack>);
+   - console.log("AFTER_STATE", <the same uint, measured after the attack>);
+   - console.log("VULNERABILITY_CONFIRMED"); — only if the attack actually succeeded.
+   BEFORE_STATE and AFTER_STATE must differ for a real exploit — if your PoC
+   would print the same value for both, the hypothesis is not demonstrated.
 
 Template:
 // SPDX-License-Identifier: MIT
@@ -79,9 +89,13 @@ contract ExploitTest is Test {
         vm.createFork("mainnet", <BLOCK>);
     }
     function test_exploit() public {
-        // setup attacker
+        uint256 before_ = /* state before */;
+        console.log("BEFORE_STATE", before_);
         // execute attack
+        uint256 after_ = /* state after */;
+        console.log("AFTER_STATE", after_);
         assertGt(address(attacker).balance, 0, "exploit failed");
+        console.log("VULNERABILITY_CONFIRMED");
     }
 }""",
     ),
@@ -210,6 +224,7 @@ class NexusTrinityAgent(Agent):
         evidence = {}
         poc = ""
         economic = {}
+        deterministic = None
 
         for gate_num in gates:
             if gate_num not in _GATES:
@@ -256,6 +271,28 @@ class NexusTrinityAgent(Agent):
                 })
                 return
 
+            # Gate 3: deterministic re-execution. The LLM's own report that
+            # its PoC passed is not evidence (see the module docstring in
+            # core/poc_verifier.py) — actually run it and only continue if
+            # an independent, non-LLM signal backs the claim. A run that
+            # executes and disproves the claim is a hard kill; a run that
+            # can't execute (forge missing, RPC down) is not treated as a
+            # disproof, but is recorded so the final finding is honest
+            # about not having been independently re-verified.
+            if gate_num == 3 and isinstance(poc, str) and poc.strip():
+                deterministic = poc_verifier.verify_evm_poc(hypothesis, poc)
+                status = deterministic["status"]
+                print(f"[nexus] Gate 3 deterministic re-run: {status}"
+                      + (f" — {deterministic['reason']}" if deterministic.get("reason") else ""))
+                if status == "NOT_CONFIRMED":
+                    self._bus.dispatch("nexus.rejected", {
+                        "hypothesis": hypothesis,
+                        "gate": 3,
+                        "kill_pattern": None,
+                        "reason": f"Deterministic re-execution disproved the claim: {deterministic['reason']}",
+                    })
+                    return
+
             # Gate 6: adversarial verdict
             if gate_num == 6:
                 raw = result.get("raw_output", "")
@@ -284,7 +321,8 @@ class NexusTrinityAgent(Agent):
 
         # All gates passed — emit finding
         severity = economic.get("severity", "High") if isinstance(economic, dict) else "High"
-        print(f"\n[nexus] ✅ FINDING CONFIRMED — {severity}")
+        det_status = deterministic["status"] if deterministic else "NOT_RUN"
+        print(f"\n[nexus] ✅ FINDING CONFIRMED — {severity} (deterministic: {det_status})")
         self._bus.dispatch("nexus.finding", {
             "severity":    severity,
             "title":       hypothesis[:120],
@@ -293,6 +331,7 @@ class NexusTrinityAgent(Agent):
             "poc":         poc,
             "gates_passed": gates,
             "economic":   economic,
+            "deterministic_verification": deterministic,
         })
 
     def _run_single_gate(self, payload):

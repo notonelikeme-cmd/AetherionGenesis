@@ -58,7 +58,7 @@ The hardest problem in bug bounty is **false positives**. A researcher who submi
 ```
 Gate 1 — Hypothesis Formation    (Tier 1 reasoning)
 Gate 2 — Evidence Gathering      (Tier 3 parser → JSON)
-Gate 3 — Simulation / PoC        (Tier 2 code → Foundry fork test)
+Gate 3 — Simulation / PoC        (Tier 2 code → Foundry fork test, then deterministically re-run — see below)
 Gate 4 — Historical Replay       (Tier 2 → DeFiHackLabs match)
 Gate 5 — Economic Impact         (Tier 1 → MEV model, severity)
 Gate 6 — Adversarial Challenge   (Tier 1 → hostile refutation attempt)
@@ -67,11 +67,13 @@ Gate 7 — Reproducibility         (Tier 2 → forge run verification)
 
 A finding only exits the pipeline if the adversarial challenger **cannot refute it**. The kill patterns are hardcoded from real rejected submissions — not theoretical. This system was built from 6 confirmed false-positive patterns across real Cantina contest submissions.
 
+**Gate 3 is independently re-verified — zero LLM involvement.** An LLM's own claim that its PoC "passed" is not evidence: it can hallucinate a result, misreport a failing run, or write a PoC that never asserts anything meaningful (`assertTrue(true)`). `core/poc_verifier.py` closes that gap: it actually runs the Foundry test Gate 3 wrote against a real fork and only lets a finding through if three independent signals agree — `forge test`'s own exit code, an explicit `VULNERABILITY_CONFIRMED` marker the PoC must emit, and a real non-zero on-chain state delta (`BEFORE_STATE`/`AFTER_STATE`). A run that executes and disproves the claim is a hard kill (`nexus.rejected`); a run that can't execute (no `forge` on PATH, RPC down) doesn't silently pass — it's recorded in the finding's `deterministic_verification` field so you know a submission wasn't independently re-checked before you act on it.
+
 ---
 
 ## Quickstart (local, no Docker required)
 
-**Prerequisites:** Python 3.11+, [Ollama](https://ollama.com) with at least one model pulled.
+**Prerequisites:** Python 3.9+, [Ollama](https://ollama.com) with at least one model pulled. Optional but recommended for Gate 3's deterministic re-verification: [Foundry](https://getfoundry.sh) (`forge`) on PATH and `ETH_RPC_URL` set to a mainnet RPC — without these, Gate 3 still runs, but findings won't be independently re-checked (this is recorded in the finding's `deterministic_verification` field, not silently skipped).
 
 ```bash
 # 1. Clone

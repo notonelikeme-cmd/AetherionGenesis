@@ -1,0 +1,17 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "verify"
+fuzz = { runs = 256 }
+fs_permissions = [{ access = "read-write", path = "./var" }]
+
+# Root-level fork testing for Nexus Trinity's deterministic PoC
+# verification (see core/poc_verifier.py). Gate 3 produces a Foundry test,
+# poc_verifier writes it under verify/ and runs it against a real fork —
+# this is not a source tree, just a landing zone for generated PoCs.
+[rpc_endpoints]
+mainnet = "${ETH_RPC_URL}"
+
+[etherscan]
+mainnet = { key = "${ETHERSCAN_API_KEY}", chain = 1 }
