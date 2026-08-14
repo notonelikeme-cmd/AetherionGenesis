@@ -33,9 +33,19 @@ class VectorMemory:
         Return top-k metadata for nearest neighbors to query_vector.
         """
         with self._lock:
+            # FAISS pads results with sentinel index -1 when k exceeds the
+            # number of stored vectors — self.metadata[-1] would then
+            # return the *last* entry (wrong) or raise IndexError (empty
+            # index). Bound k first so every returned index is real.
+            if k <= 0 or self.index.ntotal == 0:
+                return []
+            k = min(k, self.index.ntotal)
+
             D, I = self.index.search(np.array([query_vector]).astype('float32'), k)
             results = []
             for distances, indices in zip(D, I):
                 for dist, idx in zip(distances, indices):
+                    if idx < 0:
+                        continue
                     results.append((self.metadata[idx], dist))
             return results

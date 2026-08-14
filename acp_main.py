@@ -105,6 +105,11 @@ class ACPServer:
                 req = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(req, dict):
+                # JSON-RPC requests are objects; a bare array/scalar has no
+                # .get("id") and would raise below, killing this loop.
+                self._respond(None, error={"code": -32600, "message": "invalid request: expected a JSON object"})
+                continue
             if not self._inflight.acquire(blocking=False):
                 self._respond(req.get("id"), error={
                     "code": -32000,

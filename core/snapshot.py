@@ -30,10 +30,12 @@ _LOCK = threading.Lock()
 
 def _contain(root: str, path: str) -> str:
     """Resolve `path` and ensure it stays within `root`; raise if a
-    caller-supplied label (e.g. containing '../') would let it escape
-    root even after being concatenated onto the timestamp prefix."""
-    root_abs = os.path.abspath(root)
-    path_abs = os.path.abspath(path)
+    caller-supplied label (e.g. containing '../', or an existing symlink
+    planted inside root) would let it escape root even after being
+    concatenated onto the timestamp prefix. realpath (not abspath) so a
+    symlinked snapshot directory can't redirect reads/writes outside root."""
+    root_abs = os.path.realpath(root)
+    path_abs = os.path.realpath(path)
     if path_abs != root_abs and not path_abs.startswith(root_abs + os.sep):
         raise ValueError(f"invalid snapshot label: escapes {root!r}")
     return path_abs
@@ -59,11 +61,13 @@ def capture_into(bus, path, overwrite=False) -> list:
 
     Refuses to write into a non-empty directory unless `overwrite=True`,
     so a repeated branch fork or snapshot label can't silently clobber
-    an earlier capture."""
-    if os.path.isdir(path) and os.listdir(path) and not overwrite:
-        raise FileExistsError(f"snapshot directory not empty: {path!r} (pass overwrite=True to replace)")
-
+    an earlier capture. The emptiness check runs inside _LOCK — checking
+    it before acquiring the lock would let two concurrent calls both
+    observe an empty directory and race to create it."""
     with _LOCK:
+        if os.path.isdir(path) and os.listdir(path) and not overwrite:
+            raise FileExistsError(f"snapshot directory not empty: {path!r} (pass overwrite=True to replace)")
+
         os.makedirs(path, exist_ok=True)
         captured = []
 

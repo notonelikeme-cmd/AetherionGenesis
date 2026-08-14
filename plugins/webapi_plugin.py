@@ -8,14 +8,51 @@ from core.agent_base import Agent
 from core.message import new_message
 from core import caps, task_store, goal_store
 
+_SESSION_COOKIE = 'nexus_kanban_session'
+
+
 class WebAPIHandler(BaseHTTPRequestHandler):
+    def _cookie(self, name):
+        for part in self.headers.get('Cookie', '').split(';'):
+            k, _, v = part.strip().partition('=')
+            if k == name:
+                return v
+        return None
+
     def _require_scope(self, scope, qs):
         """Kanban data/HTML can carry task descriptions and verdicts from
         anywhere leads.write can reach — require a capability token like
-        the POST endpoints already do. Accepts the token via header
-        (curl/scripts) or a `token` query param (plain browser nav)."""
-        token = self.headers.get('X-Cap-Token', '') or qs.get('token', [''])[0]
-        return caps.verify(token, required_scope=scope)
+        the POST endpoints already do.
+
+        Priority: header (curl/scripts) > session cookie (the browser's
+        own follow-up requests, e.g. /kanban.json fetched by the page
+        itself) > `token` query param (a one-time bootstrap for plain
+        browser navigation only). A query-param token is never treated as
+        equivalent to a real session — it authorizes exactly one request,
+        because URLs persist in browser history and server/proxy access
+        logs. See _bootstrap_session below for how /kanban exchanges a
+        query token for a cookie instead of relying on the URL long-term.
+
+        Returns (ok, info, via_query) — via_query tells the caller whether
+        this specific request only authenticated via the URL, so it knows
+        whether to bootstrap a session.
+        """
+        token = self.headers.get('X-Cap-Token', '') or self._cookie(_SESSION_COOKIE)
+        if token:
+            ok, info = caps.verify(token, required_scope=scope)
+            return ok, info, False
+        qs_token = qs.get('token', [''])[0]
+        ok, info = caps.verify(qs_token, required_scope=scope)
+        return ok, info, ok
+
+    def _bootstrap_session(self, location, token):
+        """Exchange a one-time query-param token for an HttpOnly session
+        cookie and redirect to a clean URL, so the token doesn't linger in
+        the address bar/history on repeat views of the page."""
+        self.send_response(302)
+        self.send_header('Location', location)
+        self.send_header('Set-Cookie', f'{_SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=300')
+        self.end_headers()
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -24,9 +61,12 @@ class WebAPIHandler(BaseHTTPRequestHandler):
         graph = self.server.bus.graph.graph
 
         if path in ('/kanban.json', '/kanban'):
-            ok, info = self._require_scope('kanban:read', qs)
+            ok, info, via_query = self._require_scope('kanban:read', qs)
             if not ok:
                 self._send_json(401, {'error': f'unauthorized: {info}'})
+                return
+            if path == '/kanban' and via_query:
+                self._bootstrap_session('/kanban', qs.get('token', [''])[0])
                 return
 
         if path == '/nodes':

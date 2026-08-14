@@ -30,10 +30,13 @@ _CURRENT_FILE = os.path.join(BRANCH_ROOT, ".current")
 
 def _contain(root: str, path: str) -> str:
     """Resolve `path` and ensure it stays within `root`; raise if a
-    caller-supplied name (e.g. an absolute path or one containing '..')
-    would let it escape root."""
-    root_abs = os.path.abspath(root)
-    path_abs = os.path.abspath(path)
+    caller-supplied name (e.g. an absolute path, one containing '..', or
+    an existing symlink planted inside root) would let it escape root.
+    realpath (not abspath) so a symlinked branch directory can't redirect
+    reads/writes outside root — abspath only normalizes '..', it doesn't
+    resolve symlinks."""
+    root_abs = os.path.realpath(root)
+    path_abs = os.path.realpath(path)
     if path_abs != root_abs and not path_abs.startswith(root_abs + os.sep):
         raise ValueError(f"invalid branch name: escapes {root!r}")
     return path_abs
