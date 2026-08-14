@@ -7,10 +7,14 @@ hallucinate, misreport a failing run as a pass, or write a PoC that never
 actually asserts anything meaningful (assertTrue(true) is exactly the kill
 pattern this pipeline already screens for in plugins/nexus_trinity_plugin.py).
 This module closes that gap: it actually runs the PoC via `forge test`
-against a real fork and only calls a finding confirmed if three independent
+against a real fork and only calls a finding confirmed if four independent
 signals agree — forge's own exit code, an explicit confirmation marker in
-the PoC's own output, and a real non-zero on-chain state delta. Zero LLM
-involvement in this step.
+the PoC's own output, a real non-zero delta between BEFORE_STATE and
+AFTER_STATE, AND that both of those numbers actually appear as genuine
+`[Return]` values in forge's execution trace (not just printed by the PoC's
+own console.log, which the PoC fully controls and could otherwise fabricate
+outright — see UNVERIFIED_STATE_MARKERS below). Zero LLM involvement in
+this step.
 
 Convention the PoC must follow (see the Gate 3 system prompt in
 nexus_trinity_plugin.py, which instructs the LLM to emit these):
@@ -23,10 +27,14 @@ import os
 import re
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-VERIFY_DIR = Path(os.getenv("POC_VERIFY_DIR", str(ROOT / "verify")))
+# NOT Foundry's configured test root (see foundry.toml) -- a killed
+# process leaving a stale file here can't get picked up by a later bare
+# `forge test`, since nothing configures Foundry to scan this directory.
+VERIFY_DIR = Path(os.getenv("POC_VERIFY_DIR", str(ROOT / ".nexus_poc_scratch")))
 
 # A real transaction can't spend more gas than fits in a block. If a
 # "confirmed" run claims more than this, the fork state itself is bogus
@@ -37,6 +45,15 @@ _MAX_SANE_GAS = 30_000_000
 
 _BEFORE_RE = re.compile(r"BEFORE_STATE\D*(\d+)")
 _AFTER_RE = re.compile(r"AFTER_STATE\D*(\d+)")
+# BEFORE_STATE/AFTER_STATE are printed by the untrusted PoC itself via a
+# bare console.log — nothing stops a fabricated PoC from just printing two
+# made-up numbers with no real call behind them. This matches a genuine
+# `[Return] <value>` line from forge's own trace (an actual staticcall/call
+# result), confirmed against real forge 1.7.1 -vvvv output. The lookahead
+# rejects a hex address like `[Return] 0x...bEEF` (would otherwise
+# misparse as decimal "0") and console.log's own `[Stop]` emission never
+# matches at all, so this can't just be satisfied by the log line itself.
+_RETURN_VALUE_RE = re.compile(r"\[Return\]\s+(\d+)(?=\s|\[|$)", re.MULTILINE)
 # Real forge 1.7.1 output, confirmed by direct observation (not assumed):
 #   [PASS] test_exploit() (gas: 48032)
 #   [FAIL: exploit failed: 0 <= 0] test_exploit() (gas: 17456)
@@ -64,7 +81,12 @@ def verify_evm_poc(finding_id: str, poc_code: str, timeout: int = 180) -> dict:
     """
     safe_id = re.sub(r"[^a-zA-Z0-9_]", "_", finding_id)[:60] or "poc"
     VERIFY_DIR.mkdir(parents=True, exist_ok=True)
-    verify_path = VERIFY_DIR / f"Verify_{safe_id}_{int(time.time())}.t.sol"
+    # A bare timestamp has only 1-second resolution -- two concurrent
+    # verify_evm_poc() calls with the same/colliding finding_id in the
+    # same second would otherwise collide on the same path and one could
+    # overwrite or delete the other's file mid-run. uuid4 makes collision
+    # practically impossible regardless of timing.
+    verify_path = VERIFY_DIR / f"Verify_{safe_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}.t.sol"
 
     try:
         verify_path.write_text(poc_code, encoding="utf-8")
@@ -73,10 +95,15 @@ def verify_evm_poc(finding_id: str, poc_code: str, timeout: int = 180) -> dict:
 
     try:
         try:
+            # FOUNDRY_PROFILE=verify is what makes .nexus_poc_scratch a
+            # compiled test root at all -- the default profile (what a
+            # bare `forge test` uses) deliberately doesn't configure it.
+            env = os.environ.copy()
+            env["FOUNDRY_PROFILE"] = "verify"
             res = subprocess.run(
                 ["forge", "test", "--match-path", str(verify_path), "-vvvv"],
                 capture_output=True, text=True, timeout=timeout,
-                cwd=str(ROOT), env=os.environ.copy(),
+                cwd=str(ROOT), env=env,
             )
         except FileNotFoundError:
             return _result("UNAVAILABLE", reason="forge binary not found on PATH")
@@ -110,6 +137,17 @@ def verify_evm_poc(finding_id: str, poc_code: str, timeout: int = 180) -> dict:
         gas_used = int(gas_match.group(1)) if gas_match else None
 
         if forge_passed and claims_confirmed and delta_real:
+            real_returns = {int(v) for v in _RETURN_VALUE_RE.findall(output)}
+            if before not in real_returns or after not in real_returns:
+                return _result(
+                    "NOT_CONFIRMED", output=output, before=before, after=after, gas_used=gas_used,
+                    failure_class="UNVERIFIED_STATE_MARKERS",
+                    reason=(
+                        f"BEFORE_STATE/AFTER_STATE ({before} -> {after}) were printed by the PoC itself "
+                        "but don't match any real [Return] value in the execution trace — can't confirm "
+                        "these numbers came from an actual on-chain read rather than being hardcoded"
+                    ),
+                )
             if gas_used is not None and gas_used > _MAX_SANE_GAS:
                 return _result(
                     "NOT_CONFIRMED", output=output, before=before, after=after, gas_used=gas_used,

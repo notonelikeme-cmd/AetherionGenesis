@@ -339,11 +339,22 @@ class NexusTrinityAgent(Agent):
                     })
                     return
 
-        # All gates passed — emit finding
+        # All gates passed — emit finding. "Confirmed" is reserved for
+        # findings that actually cleared deterministic re-execution
+        # (status == "CONFIRMED"). Passing gates 1/2/4-7 alone is not
+        # confirmation — if Gate 3's PoC verification never ran, or
+        # couldn't (forge missing, RPC down), that MUST be visible at the
+        # top level, not just buried in deterministic_verification where
+        # nothing enforces anyone actually checks it.
         severity = economic.get("severity", "High") if isinstance(economic, dict) else "High"
         det_status = deterministic["status"] if deterministic else "NOT_RUN"
-        print(f"\n[nexus] ✅ FINDING CONFIRMED — {severity} (deterministic: {det_status})")
+        verified = det_status == "CONFIRMED"
+        if verified:
+            print(f"\n[nexus] ✅ FINDING CONFIRMED — {severity} (deterministic: {det_status})")
+        else:
+            print(f"\n[nexus] ⚠️  FINDING UNVERIFIED — {severity} (deterministic: {det_status} — Gate 3 was not independently re-executed)")
         self._bus.dispatch("nexus.finding", {
+            "verified":    verified,
             "severity":    severity,
             "title":       hypothesis[:120],
             "hypothesis":  hypothesis,

@@ -5,7 +5,8 @@ __pycache__/
 
 # Foundry build artifacts and generated PoC test files (poc_verifier.py
 # writes gate 3's Foundry test here transiently, then deletes it — this
-# is a backstop in case a run is killed before cleanup).
+# is a backstop in case a run is killed before cleanup). Deliberately
+# NOT Foundry's configured test root -- see foundry.toml.
 out/
 cache/
-verify/*.t.sol
+.nexus_poc_scratch/

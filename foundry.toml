@@ -2,14 +2,28 @@
 src = "src"
 out = "out"
 libs = ["lib"]
-test = "verify"
 fuzz = { runs = 256 }
-fs_permissions = [{ access = "read-write", path = "./var" }]
 
-# Root-level fork testing for Nexus Trinity's deterministic PoC
-# verification (see core/poc_verifier.py). Gate 3 produces a Foundry test,
-# poc_verifier writes it under verify/ and runs it against a real fork —
-# this is not a source tree, just a landing zone for generated PoCs.
+# No `test` override on the default profile, so a bare `forge test` (no
+# profile, no --match-path) finds nothing to run -- it defaults to
+# "test/", which doesn't exist in this repo. Generated PoCs are compiled
+# and run only under the `verify` profile below, which poc_verifier.py
+# selects explicitly via FOUNDRY_PROFILE. This means a stale file left
+# behind by a killed process can't get picked up by anyone running a
+# plain `forge test`, only by a deliberate `FOUNDRY_PROFILE=verify` run.
+# No fs_permissions on either profile: nothing here needs Solidity-level
+# filesystem cheatcodes (vm.writeFile etc.), and granting them would let
+# an untrusted, LLM-generated PoC (see Gate 3's own docstring: its
+# narration is not trusted) write into real runtime state like ./var's
+# databases.
+
+[profile.verify]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = ".nexus_poc_scratch"
+fuzz = { runs = 256 }
+
 [rpc_endpoints]
 mainnet = "${ETH_RPC_URL}"
 

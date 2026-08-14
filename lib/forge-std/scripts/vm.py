@@ -12,7 +12,12 @@ from urllib import request
 
 VoidFn = Callable[[], None]
 
-CHEATCODES_JSON_URL = "https://raw.githubusercontent.com/foundry-rs/foundry/master/crates/cheatcodes/assets/cheatcodes.json"
+# Pinned to a specific commit rather than mutable master, so re-running
+# this script without --from produces a reproducible result. Bump
+# deliberately (not silently) when intentionally upgrading forge-std past
+# 1.16.2 -- this was the latest commit touching cheatcodes.json as of
+# 2026-08-14, confirmed resolvable before pinning.
+CHEATCODES_JSON_URL = "https://raw.githubusercontent.com/foundry-rs/foundry/e4b2ad51a16d5548dc597ce9b416768421db4359/crates/cheatcodes/assets/cheatcodes.json"
 OUT_PATH = "src/Vm.sol"
 
 VM_SAFE_DOC = """\
